@@ -165,12 +165,16 @@ async function searchForRole(role, location) {
 async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
   const availableModels = await getAvailableGroqModels();
   const modelsToTry = pickModelsToTry(availableModels, [
+    // llama-3.3-70b handles JSON mode + long extraction reliably.
+    // 8b-instant is the fast fallback. The openai/gpt-oss-* models are
+    // listed last because they've been returning json_validate_failed
+    // on this prompt shape.
     'llama-3.3-70b-versatile',
     'llama-3.1-8b-instant',
-    'openai/gpt-oss-20b',
-    'openai/gpt-oss-120b',
     'qwen/qwen3-32b',
-    'moonshotai/kimi-k2-instruct'
+    'moonshotai/kimi-k2-instruct',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b'
   ]);
 
   if (modelsToTry.length === 0) {
@@ -183,7 +187,15 @@ async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
     )
   );
 
-  return perRoleJobs.flat();
+  // The same posting often appears on several listing pages (and across
+  // roles when searches overlap), so dedupe on title+company.
+  const seen = new Set();
+  return perRoleJobs.flat().filter(job => {
+    const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -194,19 +206,25 @@ async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
 async function structureOneRole(role, results, maxAgeDays, modelsToTry) {
   if (results.length === 0) return [];
 
+  // Budget the content so the whole request stays under Groq's free-tier
+  // per-request limit (8,000 tokens ≈ ~28,000 chars, minus ~3,000 chars for
+  // the instructions/schema). We split the remaining budget across however
+  // many results came back, so fewer results each get MORE content — which
+  // matters because a listing page only reveals its individual jobs deeper
+  // into the page, past the nav/header boilerplate.
+  const TOTAL_CONTENT_BUDGET = 22000;
+  const perResultBudget = Math.floor(TOTAL_CONTENT_BUDGET / results.length);
+
   const snippets = results.map((r, i) => {
-    // Cap content length to keep each request comfortably under Groq's
-    // free-tier per-request token limit (8,000 tokens ≈ ~30,000 characters
-    // total prompt). With up to 5 results per role, ~1200 chars each keeps
-    // total content around 6,000 chars — leaves headroom for the prompt
-    // instructions and JSON schema too.
-    const body = (r.raw_content || r.content || '').slice(0, 1200);
+    const body = (r.raw_content || r.content || '').slice(0, perResultBudget);
     return `[#${i}] URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
   }).join('\n\n');
 
   const prompt = `You are turning raw web page content into a clean list of individual UAE job postings for the role "${role}", across ALL experience levels — do not filter by seniority.
 
-Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "${role} Jobs in UAE — 667 Open Roles"). These pages often contain MANY individual job postings within their content, each with its own title, company, and a link. Read through the content of each page and extract every distinct individual job you can clearly identify, not just the page's own title.
+Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "${role} Jobs in UAE — 667 Open Roles"). These pages contain MANY individual job postings within their content, each with its own title, company, and a link. Read through the ENTIRE content of each page and extract EVERY distinct individual job you can identify.
+
+BE THOROUGH: aim to return as many real, distinct jobs as you can find — typically 10-30 across these pages, not just one or two. Do not stop after the first job you find on a page; keep going through the whole content. Only return few jobs if the content genuinely contains few.
 
 Rules — apply strictly:
 - Include postings at any experience level (entry-level/fresher, mid-level, senior, or unspecified). Do NOT drop a posting just because it looks senior or experienced — classify it instead, using the "experienceLevel" field.
@@ -253,32 +271,44 @@ async function callGroqWithFallback(prompt, modelsToTry) {
   for (const model of modelsToTry) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       try {
+        // Some models reject response_format json_object on this prompt
+        // ("json_validate_failed"). If the first attempt fails that way,
+        // the second attempt drops JSON mode and relies on extractJson()
+        // to pull the object out of a normal text response instead.
+        const useJsonMode = attempt === 1;
+
+        const requestBody = {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.2,
+          max_tokens: 8000
+        };
+        if (useJsonMode) {
+          requestBody.response_format = { type: 'json_object' };
+        }
+
         const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${GROQ_API_KEY}`
           },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.2,
-            max_tokens: 2000,
-            response_format: { type: 'json_object' } // forces valid JSON output where the model supports it
-          })
+          body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {
           const errorBody = await response.text();
           const isTransient = response.status === 503 || response.status === 429;
-          console.error(`Groq API error ${response.status} (model: ${model}, attempt: ${attempt}):`, errorBody);
+          const isJsonModeFailure = errorBody.includes('json_validate_failed');
+          console.error(`Groq API error ${response.status} (model: ${model}, attempt: ${attempt}, jsonMode: ${useJsonMode}):`, errorBody);
           lastError = new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
 
-          if (isTransient) {
+          if (isTransient || isJsonModeFailure) {
+            // json_validate_failed is worth one more attempt without JSON mode.
             await sleep(RETRY_DELAY_MS * attempt);
-            continue; // retry same model, or fall through to next model after MAX_ATTEMPTS_PER_MODEL
+            continue;
           }
-          break; // non-transient (e.g. this specific model rejected, or still too large) — skip to next model
+          break; // non-transient (e.g. still too large, model unavailable) — next model
         }
 
         const data = await response.json();
