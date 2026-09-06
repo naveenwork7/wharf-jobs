@@ -2,7 +2,9 @@
  * Ask the LLM to turn raw search snippets into clean job objects.
  * Now processes ONE ROLE PER CALL to stay well under Groq's TPM limits —
  * batching all roles into a single prompt was pushing requests to
- * 10-12k tokens against an 8k/min cap.
+ * 10-12k tokens against an 8k/min cap. 
+
+ 
  */
 async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
   const allJobs = [];
