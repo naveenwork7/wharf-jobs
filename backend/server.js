@@ -190,7 +190,9 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   });
 
   if (!response.ok) {
-    throw new Error(`LLM structuring failed: ${response.status}`);
+    const errorBody = await response.text();
+    console.error(`Anthropic API error ${response.status}:`, errorBody);
+    throw new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
   }
 
   const data = await response.json();
