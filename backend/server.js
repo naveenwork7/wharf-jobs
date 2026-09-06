@@ -175,18 +175,34 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   ]
 }`;
 
-  // Groq (https://groq.com) — free tier, no credit card, and built on custom
-  // LPU hardware specifically for fast inference (typically 300-900+
-  // tokens/sec, much faster than most free LLM APIs). Uses OpenAI-compatible
-  // chat completions format. We still retry + fall back across a couple of
-  // stable models in case of rate limits (429) or transient overload.
-  const MODEL_FALLBACKS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+  // Groq (https://groq.com) — free tier, no credit card, fast inference.
+  // Rather than hardcode specific model names (which Groq periodically
+  // renames/retires/restricts per-account), we ask the account's own
+  // /models endpoint what it actually has access to right now, and pick
+  // from that live list. This is the "auto-pick" approach — it can't go
+  // stale the way a hardcoded model name can.
+  const PREFERRED_MODEL_ORDER = [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'openai/gpt-oss-20b',
+    'openai/gpt-oss-120b',
+    'qwen/qwen3-32b',
+    'moonshotai/kimi-k2-instruct'
+  ];
+
+  const availableModels = await getAvailableGroqModels();
+  const modelsToTry = pickModelsToTry(availableModels, PREFERRED_MODEL_ORDER);
+
+  if (modelsToTry.length === 0) {
+    throw new Error('No usable Groq models found for this API key.');
+  }
+
   const MAX_ATTEMPTS_PER_MODEL = 2;
   const RETRY_DELAY_MS = 1500;
 
   let lastError = null;
 
-  for (const model of MODEL_FALLBACKS) {
+  for (const model of modelsToTry) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       try {
         const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -213,7 +229,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
             await sleep(RETRY_DELAY_MS * attempt);
             continue; // retry same model, or fall through to next model after MAX_ATTEMPTS_PER_MODEL
           }
-          throw lastError; // non-transient error (e.g. bad API key) — no point retrying
+          break; // non-transient (e.g. this specific model rejected) — skip to next model, don't retry it
         }
 
         const data = await response.json();
@@ -234,11 +250,53 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
         await sleep(RETRY_DELAY_MS * attempt);
       }
     }
-    console.warn(`Model ${model} exhausted ${MAX_ATTEMPTS_PER_MODEL} attempts, falling back to next model.`);
+    console.warn(`Model ${model} unavailable/exhausted, falling back to next model.`);
   }
 
   // All models/attempts exhausted — surface the last real error.
   throw lastError || new Error('LLM structuring failed: all models unavailable.');
+}
+
+/**
+ * Ask Groq what models this API key actually has access to right now.
+ * Returns an array of model ID strings (e.g. ['llama-3.3-70b-versatile', ...]).
+ */
+async function getAvailableGroqModels() {
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
+    });
+    if (!response.ok) {
+      console.error('Could not fetch Groq model list:', response.status, await response.text());
+      return [];
+    }
+    const data = await response.json();
+    return (data.data || []).map(m => m.id);
+  } catch (err) {
+    console.error('Error fetching Groq model list:', err);
+    return [];
+  }
+}
+
+/**
+ * Order the account's actually-available models by our preference list,
+ * so we try the best/fastest ones first but will happily use whatever
+ * this specific account has access to. Falls back to trying every
+ * available model (in whatever order the API returned) if none of our
+ * preferred names match — this way a completely new model lineup still
+ * works without any code change.
+ */
+function pickModelsToTry(availableModels, preferredOrder) {
+  const available = new Set(availableModels);
+  const preferredAvailable = preferredOrder.filter(m => available.has(m));
+
+  if (preferredAvailable.length > 0) return preferredAvailable;
+
+  // None of our preferred names matched — just try whatever text-capable
+  // models this account does have (skip obvious audio/TTS/guard models).
+  return availableModels.filter(m =>
+    !/whisper|tts|guard|prompt-guard/i.test(m)
+  );
 }
 
 function sleep(ms) {
