@@ -181,11 +181,22 @@ async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
     throw new Error('No usable Groq models found for this API key.');
   }
 
-  const perRoleJobs = await Promise.all(
-    perRoleResults.map(({ role, results }) =>
-      structureOneRole(role, results, maxAgeDays, modelsToTry)
-    )
-  );
+  // Run roles SEQUENTIALLY, not in parallel. Groq's free-tier limit is
+  // 8,000 tokens per MINUTE across the org — firing every role's request
+  // at once stacks them against the same budget and trips a 413 even when
+  // each request would fit on its own. Sequential requests spread the
+  // spend out and succeed.
+  const perRoleJobs = [];
+  for (const { role, results } of perRoleResults) {
+    try {
+      const jobs = await structureOneRole(role, results, maxAgeDays, modelsToTry);
+      perRoleJobs.push(jobs);
+    } catch (err) {
+      // One role failing shouldn't lose the other roles' results.
+      console.error(`Structuring failed for role "${role}":`, err.message);
+      perRoleJobs.push([]);
+    }
+  }
 
   // The same posting often appears on several listing pages (and across
   // roles when searches overlap), so dedupe on title+company.
@@ -206,31 +217,55 @@ async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
 async function structureOneRole(role, results, maxAgeDays, modelsToTry) {
   if (results.length === 0) return [];
 
-  // Budget the content so the whole request stays under Groq's free-tier
-  // per-request limit (8,000 tokens ≈ ~28,000 chars, minus ~3,000 chars for
-  // the instructions/schema). We split the remaining budget across however
-  // many results came back, so fewer results each get MORE content — which
-  // matters because a listing page only reveals its individual jobs deeper
-  // into the page, past the nav/header boilerplate.
-  const TOTAL_CONTENT_BUDGET = 22000;
+  // Budget the content to fit Groq's free tier: 8,000 TOKENS PER MINUTE
+  // (not per request). Roughly 4 chars per token, so ~8,000 chars of
+  // content ≈ 2,000 tokens, leaving room for instructions, the JSON
+  // schema, and the response itself — and for a second role's request
+  // within the same minute. Splitting the budget across results means
+  // fewer results each get more content, which matters because a listing
+  // page's actual jobs sit past the nav/header boilerplate.
+  const TOTAL_CONTENT_BUDGET = 8000;
   const perResultBudget = Math.floor(TOTAL_CONTENT_BUDGET / results.length);
+
+  // Pull real job URLs out of the markdown ourselves rather than trusting
+  // the model to transcribe them. Models frequently truncate, mangle, or
+  // invent long URLs — but they're reliable at picking an INDEX from a
+  // list. So we build the candidate link list here, hand it to the model
+  // numbered, and have it return the index. We then map the index back to
+  // the real URL in code, which makes fabricated links impossible.
+  const linkCandidates = [];
+  results.forEach(r => {
+    const body = (r.raw_content || r.content || '').slice(0, perResultBudget);
+    for (const [, text, url] of body.matchAll(/\[([^\]]{3,120})\]\((https?:\/\/[^)\s]+)\)/g)) {
+      if (isLikelyJobUrl(url) && !linkCandidates.some(c => c.url === url)) {
+        linkCandidates.push({ url, text: text.trim() });
+      }
+    }
+  });
+
+  const linkList = linkCandidates.length
+    ? linkCandidates.map((c, i) => `L${i}: ${c.text} -> ${c.url}`).join('\n')
+    : '(no per-job links found — use the page URL fallback)';
 
   const snippets = results.map((r, i) => {
     const body = (r.raw_content || r.content || '').slice(0, perResultBudget);
-    return `[#${i}] URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
+    return `[#${i}] PAGE_URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
   }).join('\n\n');
 
   const prompt = `You are turning raw web page content into a clean list of individual UAE job postings for the role "${role}", across ALL experience levels — do not filter by seniority.
 
 Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "${role} Jobs in UAE — 667 Open Roles"). These pages contain MANY individual job postings within their content, each with its own title, company, and a link. Read through the ENTIRE content of each page and extract EVERY distinct individual job you can identify.
 
-BE THOROUGH: aim to return as many real, distinct jobs as you can find — typically 10-30 across these pages, not just one or two. Do not stop after the first job you find on a page; keep going through the whole content. Only return few jobs if the content genuinely contains few.
+BE THOROUGH: extract every distinct real job you can find in the content — typically 5-15 across these pages, not just one or two. Do not stop after the first job you find on a page; keep going through the content you were given. Only return few jobs if the content genuinely contains few.
+
+CANDIDATE JOB LINKS (already extracted from the pages for you):
+${linkList}
 
 Rules — apply strictly:
 - Include postings at any experience level (entry-level/fresher, mid-level, senior, or unspecified). Do NOT drop a posting just because it looks senior or experienced — classify it instead, using the "experienceLevel" field.
 - For "experienceLevel", use exactly one of these four values: "Entry-level / Fresher", "Mid-level", "Senior-level", "Not specified".
 - Only include postings located in the UAE (Dubai, Abu Dhabi, Sharjah, or other emirates).
-- For "link": the content below is in markdown, so individual job links usually appear as markdown links like [Job Title](https://...). Use that specific job's own URL whenever you can find one. Only fall back to the page's own URL (given above each block) if no specific per-job link is present in the content — never fabricate a URL that isn't in the text below.
+- For "linkId": match each job to the CANDIDATE JOB LINK whose text best corresponds to that job, and return its id (e.g. "L3"). If no candidate link matches that job, return the exact PAGE_URL of the page you found it on in the "pageUrl" field instead and set "linkId" to null. NEVER type out a URL yourself in "linkId" — only ever an "L" id from the list above.
 - Only include postings that appear to be from the last ${maxAgeDays} days, OR where the page itself is clearly a live/current listing (dated within the last week, or says "today"/"new") even if an exact per-job date isn't shown. If a page gives no date signal at all and isn't clearly current, drop only that specific job.
 - NEVER invent a job whose title or company isn't actually present in the content below.
 - If nothing qualifies, return an empty jobs array.
@@ -249,12 +284,61 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
       "experienceLevel": "one of: Entry-level / Fresher, Mid-level, Senior-level, Not specified",
       "matchedRole": "${role}",
       "description": "one sentence, plain language",
-      "link": "the specific job posting URL if found in the content, otherwise the page URL given above"
+      "linkId": "the matching candidate link id like 'L3', or null if none matches",
+      "pageUrl": "only if linkId is null: the exact PAGE_URL of the page this job came from"
     }
   ]
 }`;
 
-  return callGroqWithFallback(prompt, modelsToTry);
+  const rawJobs = await callGroqWithFallback(prompt, modelsToTry);
+
+  // Resolve linkId back to the real URL in code. Because the model only
+  // ever returns an index, it cannot fabricate or mangle a URL — every
+  // link we output is one we actually extracted from the page content.
+  const pageUrls = new Set(results.map(r => r.url));
+
+  return rawJobs.map(job => {
+    let link = null;
+
+    if (job.linkId) {
+      const idx = parseInt(String(job.linkId).replace(/^L/i, ''), 10);
+      if (!Number.isNaN(idx) && linkCandidates[idx]) {
+        link = linkCandidates[idx].url;
+      }
+    }
+
+    // Fall back to the source page only if it's genuinely one of the pages
+    // we searched — never a URL the model made up.
+    if (!link && job.pageUrl && pageUrls.has(job.pageUrl)) {
+      link = job.pageUrl;
+    }
+
+    // Last resort: the first page we searched for this role, so the card
+    // still links somewhere real rather than nowhere.
+    if (!link) {
+      link = results[0]?.url || null;
+    }
+
+    const { linkId, pageUrl, ...rest } = job;
+    return { ...rest, link };
+  });
+}
+
+/**
+ * Heuristic: does this URL look like an individual job posting rather than
+ * a nav link, login page, or site chrome? Keeps the candidate list focused
+ * so the model isn't picking from dozens of irrelevant links.
+ */
+function isLikelyJobUrl(url) {
+  const lower = url.toLowerCase();
+
+  // Obvious non-job destinations found all over job boards.
+  const junk = /\/(login|signup|register|about|privacy|terms|contact|help|faq|blog|pricing|app|download|cookie)/;
+  if (junk.test(lower)) return false;
+
+  // Common shapes of individual job-posting URLs across the major boards.
+  const jobIsh = /(\/jobs?\/|\/job-|\/vacancy|\/vacancies|\/careers?\/|viewjob|\/posting|jk=|currentJobId=)/;
+  return jobIsh.test(lower);
 }
 
 /**
@@ -265,6 +349,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
 async function callGroqWithFallback(prompt, modelsToTry) {
   const MAX_ATTEMPTS_PER_MODEL = 2;
   const RETRY_DELAY_MS = 1500;
+  const RATE_LIMIT_DELAY_MS = 20000; // token budget refills per minute
 
   let lastError = null;
 
@@ -281,7 +366,7 @@ async function callGroqWithFallback(prompt, modelsToTry) {
           model,
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.2,
-          max_tokens: 8000
+          max_tokens: 3000
         };
         if (useJsonMode) {
           requestBody.response_format = { type: 'json_object' };
@@ -298,17 +383,22 @@ async function callGroqWithFallback(prompt, modelsToTry) {
 
         if (!response.ok) {
           const errorBody = await response.text();
-          const isTransient = response.status === 503 || response.status === 429;
+          // 413 here is Groq's tokens-per-minute rate limit, not a permanent
+          // rejection — waiting for the window to roll over usually clears it.
+          const isRateLimited = response.status === 429 || response.status === 413;
+          const isTransient = response.status === 503 || isRateLimited;
           const isJsonModeFailure = errorBody.includes('json_validate_failed');
           console.error(`Groq API error ${response.status} (model: ${model}, attempt: ${attempt}, jsonMode: ${useJsonMode}):`, errorBody);
           lastError = new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
 
           if (isTransient || isJsonModeFailure) {
-            // json_validate_failed is worth one more attempt without JSON mode.
-            await sleep(RETRY_DELAY_MS * attempt);
+            // Rate limits need a longer wait than other transient errors,
+            // since the token budget refills on a per-minute window.
+            const delay = isRateLimited ? RATE_LIMIT_DELAY_MS : RETRY_DELAY_MS * attempt;
+            await sleep(delay);
             continue;
           }
-          break; // non-transient (e.g. still too large, model unavailable) — next model
+          break; // genuinely non-transient — move to the next model
         }
 
         const data = await response.json();
