@@ -120,7 +120,7 @@ app.post('/api/jobs', async (req, res) => {
 
 /**
  * Live web search for a single role using Tavily.
- * Returns raw { role, results: [{title, url, content, publishedDate}] }
+ * Returns raw { role, results: [{title, url, content, raw_content, publishedDate}] }
  */
 async function searchForRole(role, location) {
   const query = `${role} jobs ${location} site:linkedin.com OR site:bayt.com OR site:indeed.com OR site:gulftalent.com OR site:naukrigulf.com OR site:monstergulf.com`;
@@ -132,9 +132,14 @@ async function searchForRole(role, location) {
       api_key: TAVILY_API_KEY,
       query,
       search_depth: 'advanced',
-      max_results: 10,
-      days: 3,               // Tavily's own recency filter, matches the brief
-      include_answer: false
+      max_results: 8,
+      days: 3,                    // Tavily's own recency filter, matches the brief
+      include_answer: false,
+      include_raw_content: true   // many results are listing/aggregator pages
+                                   // (e.g. "667 Open Roles | LinkedIn") — a short
+                                   // snippet only shows the page title, not the
+                                   // individual postings inside it. Full content
+                                   // lets the LLM actually find and extract them.
     })
   });
 
@@ -153,20 +158,28 @@ async function searchForRole(role, location) {
  */
 async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
   const context = perRoleResults.map(({ role, results }) => {
-    const snippets = results.map((r, i) =>
-      `[${role} #${i}] URL: ${r.url}\nTitle: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nSnippet: ${r.content?.slice(0, 500)}`
-    ).join('\n\n');
+    const snippets = results.map((r, i) => {
+      // Prefer the full page content (raw_content) over the short snippet —
+      // listing/aggregator pages (e.g. "Software Engineer Jobs in UAE |
+      // LinkedIn") only reveal individual postings in their full body, not
+      // in a one-line preview. Cap length to keep the prompt manageable.
+      const body = (r.raw_content || r.content || '').slice(0, 3000);
+      return `[${role} #${i}] URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
+    }).join('\n\n');
     return `--- Search results for role "${role}" ---\n${snippets || '(no results returned)'}`;
   }).join('\n\n');
 
-  const prompt = `You are turning raw web search results into a clean list of UAE job postings, across ALL experience levels — do not filter by seniority.
+  const prompt = `You are turning raw web page content into a clean list of individual UAE job postings, across ALL experience levels — do not filter by seniority.
+
+Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "Software Engineer Jobs in UAE — 667 Open Roles"). These pages often contain MANY individual job postings within their content — a title, a company name, and a location repeated for each one. Read through the full content of each page and extract every distinct individual job you can clearly identify, not just the page's own title.
 
 Rules — apply strictly:
 - Include postings at any experience level (entry-level/fresher, mid-level, senior, or unspecified). Do NOT drop a posting just because it looks senior or experienced — classify it instead, using the "experienceLevel" field.
 - For "experienceLevel", use exactly one of these four values: "Entry-level / Fresher", "Mid-level", "Senior-level", "Not specified".
 - Only include postings located in the UAE (Dubai, Abu Dhabi, Sharjah, or other emirates).
-- Only include postings that appear to be from the last ${maxAgeDays} days. If you cannot tell the posting date, DROP it rather than guessing.
-- NEVER invent a job that is not directly backed by one of the search result snippets below. Every job you output must correspond to a real URL from the input.
+- For "link": if the content clearly gives a direct URL to that specific job posting, use it. If you can only identify the job from a listing page and no specific posting URL is visible, use that listing page's URL instead — do not fabricate a URL that isn't present in the content.
+- Only include postings that appear to be from the last ${maxAgeDays} days, OR where the page itself is clearly a live/current listing (e.g. dated within the last week, or explicitly says "today", "new") even if an exact per-job date isn't shown. If a page gives no date signal at all and isn't clearly current, drop only that specific job, not the whole page.
+- NEVER invent a job whose title or company isn't actually present in the content below. Every job you output must be traceable to real text in the input.
 - If nothing in the results qualifies, return an empty jobs array — do not pad with unrelated results.
 
 Roles searched: ${roles.join(', ')}
@@ -230,7 +243,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
             model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.2,
-            max_tokens: 4000,
+            max_tokens: 6000,
             response_format: { type: 'json_object' } // forces valid JSON output where the model supports it
           })
         });
