@@ -78,7 +78,7 @@ app.post('/api/jobs', async (req, res) => {
     const cacheKey = JSON.stringify([...roles].sort().map(r => r.toLowerCase())) + `|${maxAgeDays}`;
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return res.json({ jobs: cached.jobs, cached: true });
+      return res.json({ jobs: cached.jobs, cached: true, debug: cached.debug });
     }
 
     // 1. Run a live web search per role (kept separate so results can be
@@ -87,19 +87,34 @@ app.post('/api/jobs', async (req, res) => {
       roles.map(role => searchForRole(role, location))
     );
 
+    // Diagnostic snapshot of what the search actually found, before any
+    // AI filtering — this is what tells you the pipeline is really
+    // running, and how aggressively the LLM step is filtering things out.
+    const debug = {
+      searchedAt: new Date().toISOString(),
+      rawResultsPerRole: perRoleResults.map(({ role, results }) => ({
+        role,
+        rawCount: results.length,
+        sampleTitles: results.slice(0, 3).map(r => r.title)
+      })),
+      totalRawResults: perRoleResults.reduce((sum, r) => sum + r.results.length, 0)
+    };
+    console.log('Search debug:', JSON.stringify(debug, null, 2));
+
     // 2. Hand the raw search snippets to an LLM to structure + validate
     //    (fresher-level only, UAE only, posted within maxAgeDays, no
     //    hallucinated postings — it must anchor every job to a real
     //    snippet/link it was given).
     const structuredJobs = await structureWithLLM(perRoleResults, roles, maxAgeDays);
+    debug.filteredCount = structuredJobs.length;
 
-    cache.set(cacheKey, { timestamp: Date.now(), jobs: structuredJobs });
+    cache.set(cacheKey, { timestamp: Date.now(), jobs: structuredJobs, debug });
 
-    res.json({ jobs: structuredJobs, cached: false });
+    res.json({ jobs: structuredJobs, cached: false, debug });
 
   } catch (err) {
     console.error('Search failed:', err);
-    res.status(502).json({ error: 'Upstream search failed. Try again shortly.' });
+    res.status(502).json({ error: 'Upstream search failed. Try again shortly.', details: err.message });
   }
 });
 
@@ -108,7 +123,7 @@ app.post('/api/jobs', async (req, res) => {
  * Returns raw { role, results: [{title, url, content, publishedDate}] }
  */
 async function searchForRole(role, location) {
-  const query = `${role} fresher entry level jobs ${location} site:linkedin.com OR site:bayt.com OR site:indeed.com OR site:gulftalent.com OR site:naukrigulf.com OR site:monstergulf.com`;
+  const query = `${role} jobs ${location} site:linkedin.com OR site:bayt.com OR site:indeed.com OR site:gulftalent.com OR site:naukrigulf.com OR site:monstergulf.com`;
 
   const response = await fetch('https://api.tavily.com/search', {
     method: 'POST',
@@ -132,10 +147,9 @@ async function searchForRole(role, location) {
 }
 
 /**
- * Ask Claude to turn raw search snippets into clean, validated job objects.
- * The model is explicitly told to discard anything that isn't clearly a
- * fresher/entry-level UAE posting from the last N days, and to never
- * invent a job that isn't backed by a snippet it was given.
+ * Ask the LLM to turn raw search snippets into clean job objects, tagging
+ * each with its experience level rather than dropping non-fresher roles —
+ * this lets the frontend filter by level locally without a new search.
  */
 async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
   const context = perRoleResults.map(({ role, results }) => {
@@ -145,10 +159,11 @@ async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
     return `--- Search results for role "${role}" ---\n${snippets || '(no results returned)'}`;
   }).join('\n\n');
 
-  const prompt = `You are filtering raw web search results into a clean list of UAE fresher/entry-level job postings.
+  const prompt = `You are turning raw web search results into a clean list of UAE job postings, across ALL experience levels — do not filter by seniority.
 
 Rules — apply strictly:
-- Only include postings that are clearly Entry-level / Fresher / 0-1 years experience. If seniority is unclear or looks mid/senior level, DROP it.
+- Include postings at any experience level (entry-level/fresher, mid-level, senior, or unspecified). Do NOT drop a posting just because it looks senior or experienced — classify it instead, using the "experienceLevel" field.
+- For "experienceLevel", use exactly one of these four values: "Entry-level / Fresher", "Mid-level", "Senior-level", "Not specified".
 - Only include postings located in the UAE (Dubai, Abu Dhabi, Sharjah, or other emirates).
 - Only include postings that appear to be from the last ${maxAgeDays} days. If you cannot tell the posting date, DROP it rather than guessing.
 - NEVER invent a job that is not directly backed by one of the search result snippets below. Every job you output must correspond to a real URL from the input.
@@ -167,7 +182,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
       "company": "string",
       "location": "string",
       "postedRelative": "e.g. '2 days ago' or 'Today'",
-      "experienceLevel": "Fresher / Entry-level",
+      "experienceLevel": "one of: Entry-level / Fresher, Mid-level, Senior-level, Not specified",
       "matchedRole": "which searched role this corresponds to",
       "description": "one sentence, plain language",
       "link": "the exact URL from the snippet"
