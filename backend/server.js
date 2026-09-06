@@ -21,7 +21,7 @@
  *   npm init -y
  *   npm install express cors node-fetch dotenv
  *   echo "TAVILY_API_KEY=your_key_here" > .env
- *   echo "GEMINI_API_KEY=your_key_here" >> .env
+ *   echo "GROQ_API_KEY=your_key_here" >> .env
  *   node server.js
  *
  * Then open index.html (or serve it statically — see bottom of this file)
@@ -50,7 +50,7 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const CACHE_TTL_MS = 3 * 60 * 1000; // shared cache window, shorter than the 5-min client refresh
 
 // In-memory shared cache: { cacheKey: { timestamp, jobs } }
@@ -175,11 +175,12 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   ]
 }`;
 
-  // Google's free tier occasionally returns 503 ("model overloaded") or 429
-  // (rate limited) under high demand — these are transient, not real
-  // failures. We retry with backoff, and if a specific model is struggling,
-  // fall back to sibling Flash models before giving up.
-  const MODEL_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  // Groq (https://groq.com) — free tier, no credit card, and built on custom
+  // LPU hardware specifically for fast inference (typically 300-900+
+  // tokens/sec, much faster than most free LLM APIs). Uses OpenAI-compatible
+  // chat completions format. We still retry + fall back across a couple of
+  // stable models in case of rate limits (429) or transient overload.
+  const MODEL_FALLBACKS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
   const MAX_ATTEMPTS_PER_MODEL = 2;
   const RETRY_DELAY_MS = 1500;
 
@@ -188,22 +189,24 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   for (const model of MODEL_FALLBACKS) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.2, maxOutputTokens: 2000 }
-            })
-          }
-        );
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${GROQ_API_KEY}`
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.2,
+            max_tokens: 2000
+          })
+        });
 
         if (!response.ok) {
           const errorBody = await response.text();
           const isTransient = response.status === 503 || response.status === 429;
-          console.error(`Gemini API error ${response.status} (model: ${model}, attempt: ${attempt}):`, errorBody);
+          console.error(`Groq API error ${response.status} (model: ${model}, attempt: ${attempt}):`, errorBody);
           lastError = new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
 
           if (isTransient) {
@@ -214,7 +217,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
         }
 
         const data = await response.json();
-        const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+        const text = data.choices?.[0]?.message?.content || '';
         const cleaned = text.replace(/```json|```/g, '').trim();
 
         try {
