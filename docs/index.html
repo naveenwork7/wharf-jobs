@@ -203,6 +203,34 @@
     background: #fff;
   }
 
+  .level-filter {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .level-btn {
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink-soft);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 14px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: all 0.12s ease;
+  }
+
+  .level-btn:hover { border-color: var(--gold); }
+
+  .level-btn.active {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--paper);
+  }
+
   .results-count {
     font-size: 14px;
     color: var(--ink-soft);
@@ -355,7 +383,7 @@
 <header>
   <div class="header-row">
     <div class="brand"><span class="dot"></span>Wharf</div>
-    <div class="tagline">Fresher &amp; entry-level roles across the UAE, refreshed live</div>
+    <div class="tagline">All experience levels across the UAE — filter as you go, refreshed live</div>
   </div>
   <div class="search-shell">
     <div class="tag-input" id="tagInput">
@@ -374,8 +402,13 @@
 <main>
   <div class="filter-strip">
     <span class="filter-pill">📍 UAE — all emirates</span>
-    <span class="filter-pill">🎓 Entry-level / Fresher only</span>
     <span class="filter-pill">🕒 Posted in the last 3 days</span>
+  </div>
+
+  <div class="level-filter" id="levelFilter">
+    <button class="level-btn active" data-level="all">All levels</button>
+    <button class="level-btn" data-level="entry">Entry-level / Fresher</button>
+    <button class="level-btn" data-level="experienced">Experienced</button>
   </div>
 
   <div id="errorSlot"></div>
@@ -414,6 +447,8 @@
   let autoRefreshTimer = null;
   let msRemaining = AUTO_REFRESH_MS;
   let isFetching = false;
+  let allJobs = [];           // full unfiltered result set from the last search
+  let activeLevel = 'all';    // 'all' | 'entry' | 'experienced'
 
   const tagInputEl = document.getElementById('tagInput');
   const roleInputEl = document.getElementById('roleInput');
@@ -423,6 +458,25 @@
   const resultsSlot = document.getElementById('resultsSlot');
   const resultsMeta = document.getElementById('resultsMeta');
   const errorSlot = document.getElementById('errorSlot');
+  const levelFilterEl = document.getElementById('levelFilter');
+
+  // ---------------------------------------------------------------
+  // Experience-level filter (client-side — no re-search needed)
+  // ---------------------------------------------------------------
+  function jobMatchesLevel(job, level) {
+    if (level === 'all') return true;
+    const lvl = (job.experienceLevel || '').toLowerCase();
+    const isEntry = lvl.includes('entry') || lvl.includes('fresher');
+    return level === 'entry' ? isEntry : !isEntry; // 'experienced' = everything else (mid/senior/not specified)
+  }
+
+  levelFilterEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.level-btn');
+    if (!btn) return;
+    activeLevel = btn.dataset.level;
+    levelFilterEl.querySelectorAll('.level-btn').forEach(b => b.classList.toggle('active', b === btn));
+    renderResults(allJobs);
+  });
 
   // ---------------------------------------------------------------
   // Tag input handling
@@ -490,7 +544,7 @@
       const res = await fetch(API_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roles, location: 'UAE', experience: 'fresher', maxAgeDays: 3 })
+        body: JSON.stringify({ roles, location: 'UAE', maxAgeDays: 3 })
       });
 
       if (!res.ok) {
@@ -501,7 +555,8 @@
       }
 
       const data = await res.json();
-      renderResults(data.jobs || []);
+      allJobs = data.jobs || [];
+      renderResults(allJobs);
       lastUpdatedEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
       resetCountdown();
 
@@ -552,16 +607,28 @@
       </div>`;
   }
 
-  function renderResults(jobs) {
-    if (!jobs.length) {
+  function renderResults(jobsFromSearch) {
+    const total = jobsFromSearch.length;
+    const jobs = jobsFromSearch.filter(job => jobMatchesLevel(job, activeLevel));
+
+    if (!total) {
       renderEmpty(
-        "No fresher jobs found in the last 3 days",
+        "No jobs found in the last 3 days",
         "Try a broader role name, or check back after the next auto-refresh."
       );
       return;
     }
 
-    resultsMeta.innerHTML = `<div class="results-count">${jobs.length} listing${jobs.length === 1 ? '' : 's'} found</div>`;
+    if (!jobs.length) {
+      renderEmpty(
+        "No jobs match this filter",
+        `Found ${total} job${total === 1 ? '' : 's'} overall — try "All levels" or a different filter.`
+      );
+      return;
+    }
+
+    const filterNote = activeLevel === 'all' ? '' : ` (of ${total} total)`;
+    resultsMeta.innerHTML = `<div class="results-count">${jobs.length} listing${jobs.length === 1 ? '' : 's'} found${filterNote}</div>`;
 
     resultsSlot.innerHTML = `<div class="job-grid">
       ${jobs.map(job => `
@@ -572,7 +639,7 @@
           </div>
           <div class="job-company">${escapeHtml(job.company || 'Unknown company')}</div>
           <div class="job-meta">
-            <span class="exp-tag">${escapeHtml(job.experienceLevel || 'Fresher')}</span>
+            <span class="exp-tag">${escapeHtml(job.experienceLevel || 'Not specified')}</span>
             <span>${escapeHtml(job.location || 'UAE')}</span>
           </div>
           ${job.matchedRole ? `<span class="matched-role">Matched: ${escapeHtml(job.matchedRole)}</span>` : ''}
