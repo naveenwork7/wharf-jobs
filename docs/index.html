@@ -494,6 +494,9 @@
       });
 
       if (!res.ok) {
+        if (res.status === 502) {
+          throw new Error('TEMPORARY_OVERLOAD');
+        }
         throw new Error(`Backend returned ${res.status}`);
       }
 
@@ -504,12 +507,19 @@
 
     } catch (err) {
       console.error(err);
-      showError(
-        "Couldn't reach the job search backend at " + API_ENDPOINT + ". " +
-        "Make sure BACKEND_BASE_URL near the top of this file's script is set to your " +
-        "deployed backend's URL (see README), and that the backend service is awake/running."
-      );
-      renderEmpty("No results to show", "Fix the backend connection, then hit Search now.");
+      if (err.message === 'TEMPORARY_OVERLOAD') {
+        showError(
+          "The job search service is briefly overloaded (this happens occasionally on the free tier). " +
+          "It already retried automatically — just click Search now again in a few seconds."
+        );
+      } else {
+        showError(
+          "Couldn't reach the job search backend at " + API_ENDPOINT + ". " +
+          "Make sure BACKEND_BASE_URL near the top of this file's script is set to your " +
+          "deployed backend's URL (see README), and that the backend service is awake/running."
+        );
+      }
+      renderEmpty("No results to show", "Hit Search now to try again.");
     } finally {
       isFetching = false;
       refreshBtn.disabled = false;
