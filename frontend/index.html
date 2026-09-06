@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wharf — UAE Fresher Jobs</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+
+  :root {
+    --ink: #10202E;
+    --ink-soft: #2C3E4E;
+    --gold: #C89B3C;
+    --gold-soft: #E8D3A0;
+    --teal: #2E5F5A;
+    --paper: #FAFAF7;
+    --paper-dim: #F1EEE6;
+    --line: #DCD6C6;
+    --danger: #B4442E;
+    --radius: 10px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    line-height: 1.5;
+  }
+
+  h1, h2, .brand, .role-tag, .refresh-btn {
+    font-family: 'Space Grotesk', sans-serif;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 20px 28px;
+  }
+
+  .header-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    max-width: 1080px;
+    margin: 0 auto 18px auto;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .brand {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .brand .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--gold);
+    display: inline-block;
+  }
+
+  .tagline {
+    font-size: 13px;
+    color: #AEB9C2;
+  }
+
+  .search-shell {
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+
+  .tag-input {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    background: #16283A;
+    border: 1px solid #2A3F52;
+    border-radius: var(--radius);
+    padding: 10px 12px;
+  }
+
+  .role-tag {
+    background: var(--gold);
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 8px 6px 12px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .role-tag button {
+    background: rgba(16,32,46,0.15);
+    border: none;
+    color: var(--ink);
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .tag-input input {
+    flex: 1;
+    min-width: 180px;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--paper);
+    font-size: 14px;
+    font-family: 'Inter', sans-serif;
+    padding: 6px 4px;
+  }
+
+  .tag-input input::placeholder { color: #7C8B99; }
+
+  .search-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .refresh-btn {
+    background: var(--gold);
+    color: var(--ink);
+    border: none;
+    font-weight: 700;
+    font-size: 14px;
+    padding: 10px 18px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: transform 0.1s ease;
+  }
+  .refresh-btn:hover { transform: translateY(-1px); }
+  .refresh-btn:disabled { opacity: 0.6; cursor: default; transform: none; }
+
+  .refresh-meta {
+    font-size: 12.5px;
+    color: #9FB0BC;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #5FBE8A;
+    display: inline-block;
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(95,190,138,0.5); }
+    70%  { box-shadow: 0 0 0 6px rgba(95,190,138,0); }
+    100% { box-shadow: 0 0 0 0 rgba(95,190,138,0); }
+  }
+
+  /* ---------- Main ---------- */
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 28px;
+  }
+
+  .filter-strip {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+
+  .filter-pill {
+    border: 1px solid var(--line);
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: #fff;
+  }
+
+  .results-count {
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin-bottom: 16px;
+  }
+
+  .job-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+  }
+
+  .job-card {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .job-card .top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .job-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0;
+  }
+
+  .posted-tag {
+    font-size: 11px;
+    color: var(--teal);
+    background: #E5EEEB;
+    padding: 3px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .job-company {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+
+  .job-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: #7C8B99;
+  }
+
+  .exp-tag {
+    background: var(--paper-dim);
+    padding: 3px 9px;
+    border-radius: 6px;
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+
+  .matched-role {
+    font-size: 11px;
+    color: var(--gold);
+    border: 1px solid var(--gold-soft);
+    padding: 2px 8px;
+    border-radius: 6px;
+    align-self: flex-start;
+  }
+
+  .job-desc {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .job-card a.apply-link {
+    margin-top: auto;
+    display: inline-block;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 2px solid var(--gold);
+    align-self: flex-start;
+    padding-bottom: 1px;
+  }
+
+  /* ---------- States ---------- */
+  .state-block {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--ink-soft);
+  }
+
+  .state-block h2 {
+    font-size: 18px;
+    margin: 0 0 6px 0;
+    color: var(--ink);
+  }
+
+  .state-block p { font-size: 14px; margin: 0; }
+
+  .spinner {
+    width: 26px;
+    height: 26px;
+    border: 3px solid var(--paper-dim);
+    border-top-color: var(--gold);
+    border-radius: 50%;
+    margin: 0 auto 16px auto;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-block {
+    border: 1px solid #EBC9BE;
+    background: #FBEFEB;
+    color: var(--danger);
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    font-size: 13.5px;
+    margin-bottom: 18px;
+  }
+
+  footer {
+    max-width: 1080px;
+    margin: 20px auto 40px auto;
+    padding: 0 28px;
+    font-size: 12px;
+    color: #A0AAB2;
+  }
+
+  @media (max-width: 560px) {
+    header { padding: 16px 18px; }
+    main { padding: 20px 18px; }
+    .job-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-row">
+    <div class="brand"><span class="dot"></span>Wharf</div>
+    <div class="tagline">Fresher &amp; entry-level roles across the UAE, refreshed live</div>
+  </div>
+  <div class="search-shell">
+    <div class="tag-input" id="tagInput">
+      <input type="text" id="roleInput" placeholder="Type a role and press Enter — e.g. Data Analyst" />
+    </div>
+    <div class="search-row">
+      <button class="refresh-btn" id="refreshBtn">Search now</button>
+      <div class="refresh-meta">
+        <span><span class="pulse"></span>Auto-refresh in <strong id="countdown">5:00</strong></span>
+        <span id="lastUpdated">Not yet searched</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="filter-strip">
+    <span class="filter-pill">📍 UAE — all emirates</span>
+    <span class="filter-pill">🎓 Entry-level / Fresher only</span>
+    <span class="filter-pill">🕒 Posted in the last 3 days</span>
+  </div>
+
+  <div id="errorSlot"></div>
+  <div id="resultsMeta"></div>
+  <div id="resultsSlot">
+    <div class="state-block">
+      <h2>Add a role to get started</h2>
+      <p>Type a job title above and press Enter — you can add several before searching.</p>
+    </div>
+  </div>
+</main>
+
+<footer>
+  Wharf checks LinkedIn, Bayt, Indeed UAE, GulfTalent, Naukrigulf, Monster Gulf and company career pages via a live search backend.
+  This demo needs that backend running to return real results — see <code>server.js</code> / README.
+</footer>
+
+<script>
+  // ---------------------------------------------------------------
+  // Config
+  // ---------------------------------------------------------------
+  // IMPORTANT: GitHub Pages only serves static files — it cannot run
+  // server.js. Deploy the backend separately (Render/Railway/Fly.io),
+  // then paste its public URL here, e.g.:
+  //   const BACKEND_BASE_URL = "https://wharf-backend.onrender.com";
+  const BACKEND_BASE_URL = "https://YOUR-BACKEND-URL-HERE.onrender.com";
+  const API_ENDPOINT = `${BACKEND_BASE_URL}/api/jobs`;
+  const AUTO_REFRESH_MS = 5 * 60 * 1000;  // 5 minutes
+  const MAX_ROLES = 6;
+
+  // ---------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------
+  let roles = [];
+  let countdownTimer = null;
+  let autoRefreshTimer = null;
+  let msRemaining = AUTO_REFRESH_MS;
+  let isFetching = false;
+
+  const tagInputEl = document.getElementById('tagInput');
+  const roleInputEl = document.getElementById('roleInput');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const countdownEl = document.getElementById('countdown');
+  const lastUpdatedEl = document.getElementById('lastUpdated');
+  const resultsSlot = document.getElementById('resultsSlot');
+  const resultsMeta = document.getElementById('resultsMeta');
+  const errorSlot = document.getElementById('errorSlot');
+
+  // ---------------------------------------------------------------
+  // Tag input handling
+  // ---------------------------------------------------------------
+  function renderTags() {
+    tagInputEl.querySelectorAll('.role-tag').forEach(el => el.remove());
+    roles.forEach((role, i) => {
+      const tag = document.createElement('span');
+      tag.className = 'role-tag';
+      tag.innerHTML = `${escapeHtml(role)} <button aria-label="Remove ${escapeHtml(role)}" data-i="${i}">✕</button>`;
+      tagInputEl.insertBefore(tag, roleInputEl);
+    });
+  }
+
+  tagInputEl.addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON') {
+      const i = Number(e.target.dataset.i);
+      roles.splice(i, 1);
+      renderTags();
+    }
+  });
+
+  roleInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const val = roleInputEl.value.trim();
+      if (val && !roles.includes(val) && roles.length < MAX_ROLES) {
+        roles.push(val);
+        roleInputEl.value = '';
+        renderTags();
+      }
+    } else if (e.key === 'Backspace' && roleInputEl.value === '' && roles.length) {
+      roles.pop();
+      renderTags();
+    }
+  });
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  // ---------------------------------------------------------------
+  // Fetch logic — reusable for manual + auto refresh
+  // ---------------------------------------------------------------
+  async function runSearch() {
+    if (isFetching) return;
+    if (roles.length === 0) {
+      renderEmpty("Add a role to get started", "Type a job title above and press Enter — you can add several before searching.");
+      return;
+    }
+    if (BACKEND_BASE_URL.includes("YOUR-BACKEND-URL-HERE")) {
+      showError("Set BACKEND_BASE_URL in index.html to your deployed backend's URL first (see README.md).");
+      renderEmpty("Backend not configured", "Deploy backend/server.js (e.g. to Render), then paste its URL into BACKEND_BASE_URL.");
+      return;
+    }
+
+    isFetching = true;
+    refreshBtn.disabled = true;
+    errorSlot.innerHTML = '';
+    renderLoading();
+
+    try {
+      const res = await fetch(API_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roles, location: 'UAE', experience: 'fresher', maxAgeDays: 3 })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Backend returned ${res.status}`);
+      }
+
+      const data = await res.json();
+      renderResults(data.jobs || []);
+      lastUpdatedEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+      resetCountdown();
+
+    } catch (err) {
+      console.error(err);
+      showError(
+        "Couldn't reach the job search backend at " + API_ENDPOINT + ". " +
+        "Make sure BACKEND_BASE_URL near the top of this file's script is set to your " +
+        "deployed backend's URL (see README), and that the backend service is awake/running."
+      );
+      renderEmpty("No results to show", "Fix the backend connection, then hit Search now.");
+    } finally {
+      isFetching = false;
+      refreshBtn.disabled = false;
+    }
+  }
+
+  function showError(msg) {
+    errorSlot.innerHTML = `<div class="error-block">${escapeHtml(msg)}</div>`;
+  }
+
+  // ---------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------
+  function renderLoading() {
+    resultsMeta.innerHTML = '';
+    resultsSlot.innerHTML = `
+      <div class="state-block">
+        <div class="spinner"></div>
+        <h2>Searching the web for fresh listings…</h2>
+        <p>Checking LinkedIn, Bayt, Indeed UAE, GulfTalent and more for: ${roles.map(escapeHtml).join(', ')}</p>
+      </div>`;
+  }
+
+  function renderEmpty(title, sub) {
+    resultsMeta.innerHTML = '';
+    resultsSlot.innerHTML = `
+      <div class="state-block">
+        <h2>${escapeHtml(title)}</h2>
+        <p>${escapeHtml(sub)}</p>
+      </div>`;
+  }
+
+  function renderResults(jobs) {
+    if (!jobs.length) {
+      renderEmpty(
+        "No fresher jobs found in the last 3 days",
+        "Try a broader role name, or check back after the next auto-refresh."
+      );
+      return;
+    }
+
+    resultsMeta.innerHTML = `<div class="results-count">${jobs.length} listing${jobs.length === 1 ? '' : 's'} found</div>`;
+
+    resultsSlot.innerHTML = `<div class="job-grid">
+      ${jobs.map(job => `
+        <div class="job-card">
+          <div class="top-row">
+            <h3 class="job-title">${escapeHtml(job.title || 'Untitled role')}</h3>
+            <span class="posted-tag">${escapeHtml(job.postedRelative || '')}</span>
+          </div>
+          <div class="job-company">${escapeHtml(job.company || 'Unknown company')}</div>
+          <div class="job-meta">
+            <span class="exp-tag">${escapeHtml(job.experienceLevel || 'Fresher')}</span>
+            <span>${escapeHtml(job.location || 'UAE')}</span>
+          </div>
+          ${job.matchedRole ? `<span class="matched-role">Matched: ${escapeHtml(job.matchedRole)}</span>` : ''}
+          <p class="job-desc">${escapeHtml(job.description || '')}</p>
+          ${job.link ? `<a class="apply-link" href="${job.link}" target="_blank" rel="noopener noreferrer">View / Apply →</a>` : ''}
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  // ---------------------------------------------------------------
+  // Auto-refresh + countdown
+  // ---------------------------------------------------------------
+  function resetCountdown() {
+    msRemaining = AUTO_REFRESH_MS;
+  }
+
+  function tickCountdown() {
+    msRemaining -= 1000;
+    if (msRemaining <= 0) {
+      runSearch();
+      msRemaining = AUTO_REFRESH_MS;
+    }
+    const totalSec = Math.max(0, Math.floor(msRemaining / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    countdownEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  countdownTimer = setInterval(tickCountdown, 1000);
+
+  // ---------------------------------------------------------------
+  // Manual refresh
+  // ---------------------------------------------------------------
+  refreshBtn.addEventListener('click', runSearch);
+
+  renderTags();
+</script>
+
+</body>
+</html>
