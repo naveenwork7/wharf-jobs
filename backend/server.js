@@ -230,7 +230,8 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
             model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.2,
-            max_tokens: 2000
+            max_tokens: 4000,
+            response_format: { type: 'json_object' } // forces valid JSON output where the model supports it
           })
         });
 
@@ -248,16 +249,28 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
         }
 
         const data = await response.json();
+        const finishReason = data.choices?.[0]?.finish_reason;
         const text = data.choices?.[0]?.message?.content || '';
-        const cleaned = text.replace(/```json|```/g, '').trim();
 
-        try {
-          const parsed = JSON.parse(cleaned);
-          return parsed.jobs || [];
-        } catch (e) {
-          console.error('Failed to parse LLM output:', text);
-          return [];
+        if (finishReason === 'length') {
+          // Output got cut off before finishing — a partial JSON object will
+          // never parse. Treat this like a transient failure and retry
+          // (a shorter result set or different model may fit).
+          console.error(`Groq response truncated (model: ${model}, attempt: ${attempt}) — hit max_tokens.`);
+          lastError = new Error('LLM structuring failed: response truncated (max_tokens).');
+          await sleep(RETRY_DELAY_MS * attempt);
+          continue;
         }
+
+        const parsed = extractJson(text);
+        if (parsed) {
+          return parsed.jobs || [];
+        }
+
+        console.error(`Failed to parse LLM output (model: ${model}, attempt: ${attempt}). Raw text:`, text);
+        lastError = new Error('LLM structuring failed: could not parse JSON from model output.');
+        await sleep(RETRY_DELAY_MS * attempt);
+        continue;
 
       } catch (err) {
         lastError = err;
@@ -316,6 +329,41 @@ function pickModelsToTry(availableModels, preferredOrder) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Pull a JSON object out of a model's raw text response. Handles the
+ * common failure modes: markdown code fences, stray prose before/after
+ * the JSON, or minor leading/trailing whitespace. Returns null (not a
+ * throw) if nothing usable is found, so the caller can decide to retry.
+ */
+function extractJson(text) {
+  if (!text) return null;
+
+  // Strip markdown code fences if present.
+  let cleaned = text.replace(/```json|```/g, '').trim();
+
+  // Try a direct parse first (the common, well-behaved case).
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Fall through to a more forgiving extraction below.
+  }
+
+  // Some models wrap the JSON in a sentence or two. Grab from the first
+  // '{' to the matching last '}' and try again.
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch (e) {
+      // Still not valid — give up and let the caller retry.
+    }
+  }
+
+  return null;
 }
 
 app.listen(PORT, () => {
