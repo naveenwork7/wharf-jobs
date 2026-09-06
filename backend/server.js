@@ -132,14 +132,13 @@ async function searchForRole(role, location) {
       api_key: TAVILY_API_KEY,
       query,
       search_depth: 'advanced',
-      max_results: 8,
-      days: 3,                    // Tavily's own recency filter, matches the brief
+      max_results: 5,
+      days: 3,                         // Tavily's own recency filter, matches the brief
       include_answer: false,
-      include_raw_content: true   // many results are listing/aggregator pages
-                                   // (e.g. "667 Open Roles | LinkedIn") — a short
-                                   // snippet only shows the page title, not the
-                                   // individual postings inside it. Full content
-                                   // lets the LLM actually find and extract them.
+      include_raw_content: 'markdown'  // markdown (not plain text) keeps the actual
+                                        // hyperlinks on a listing page, so the LLM can
+                                        // pull out each job's real posting URL instead
+                                        // of only ever having the listing page's own URL
     })
   });
 
@@ -152,40 +151,74 @@ async function searchForRole(role, location) {
 }
 
 /**
- * Ask the LLM to turn raw search snippets into clean job objects, tagging
- * each with its experience level rather than dropping non-fresher roles —
- * this lets the frontend filter by level locally without a new search.
+ * Ask the LLM to turn raw search results into clean job objects, tagging
+ * each with its experience level rather than dropping non-fresher roles.
+ *
+ * IMPORTANT: this runs ONE SMALLER REQUEST PER ROLE rather than batching
+ * every role into a single giant prompt. Groq's free tier caps a single
+ * request at 8,000 tokens — batching multiple roles' full page content
+ * together blew well past that (12,000+ tokens) and got rejected outright
+ * (413), even before retries could help. Per-role requests stay small
+ * enough to fit, and roles run in parallel so total wall-clock time is
+ * about the same as one big call would have been.
  */
 async function structureWithLLM(perRoleResults, roles, maxAgeDays) {
-  const context = perRoleResults.map(({ role, results }) => {
-    const snippets = results.map((r, i) => {
-      // Prefer the full page content (raw_content) over the short snippet —
-      // listing/aggregator pages (e.g. "Software Engineer Jobs in UAE |
-      // LinkedIn") only reveal individual postings in their full body, not
-      // in a one-line preview. Cap length to keep the prompt manageable.
-      const body = (r.raw_content || r.content || '').slice(0, 3000);
-      return `[${role} #${i}] URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
-    }).join('\n\n');
-    return `--- Search results for role "${role}" ---\n${snippets || '(no results returned)'}`;
+  const availableModels = await getAvailableGroqModels();
+  const modelsToTry = pickModelsToTry(availableModels, [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'openai/gpt-oss-20b',
+    'openai/gpt-oss-120b',
+    'qwen/qwen3-32b',
+    'moonshotai/kimi-k2-instruct'
+  ]);
+
+  if (modelsToTry.length === 0) {
+    throw new Error('No usable Groq models found for this API key.');
+  }
+
+  const perRoleJobs = await Promise.all(
+    perRoleResults.map(({ role, results }) =>
+      structureOneRole(role, results, maxAgeDays, modelsToTry)
+    )
+  );
+
+  return perRoleJobs.flat();
+}
+
+/**
+ * Build a prompt scoped to ONE role's results and run it through Groq.
+ * Keeping this per-role (rather than all roles combined) is what keeps
+ * each request under the free-tier token ceiling.
+ */
+async function structureOneRole(role, results, maxAgeDays, modelsToTry) {
+  if (results.length === 0) return [];
+
+  const snippets = results.map((r, i) => {
+    // Cap content length to keep each request comfortably under Groq's
+    // free-tier per-request token limit (8,000 tokens ≈ ~30,000 characters
+    // total prompt). With up to 5 results per role, ~1200 chars each keeps
+    // total content around 6,000 chars — leaves headroom for the prompt
+    // instructions and JSON schema too.
+    const body = (r.raw_content || r.content || '').slice(0, 1200);
+    return `[#${i}] URL: ${r.url}\nPage title: ${r.title}\nPublished: ${r.published_date || 'unknown'}\nContent:\n${body}`;
   }).join('\n\n');
 
-  const prompt = `You are turning raw web page content into a clean list of individual UAE job postings, across ALL experience levels — do not filter by seniority.
+  const prompt = `You are turning raw web page content into a clean list of individual UAE job postings for the role "${role}", across ALL experience levels — do not filter by seniority.
 
-Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "Software Engineer Jobs in UAE — 667 Open Roles"). These pages often contain MANY individual job postings within their content — a title, a company name, and a location repeated for each one. Read through the full content of each page and extract every distinct individual job you can clearly identify, not just the page's own title.
+Some of the pages below are LISTING or AGGREGATOR pages (e.g. a LinkedIn or Bayt search-results page titled something like "${role} Jobs in UAE — 667 Open Roles"). These pages often contain MANY individual job postings within their content, each with its own title, company, and a link. Read through the content of each page and extract every distinct individual job you can clearly identify, not just the page's own title.
 
 Rules — apply strictly:
 - Include postings at any experience level (entry-level/fresher, mid-level, senior, or unspecified). Do NOT drop a posting just because it looks senior or experienced — classify it instead, using the "experienceLevel" field.
 - For "experienceLevel", use exactly one of these four values: "Entry-level / Fresher", "Mid-level", "Senior-level", "Not specified".
 - Only include postings located in the UAE (Dubai, Abu Dhabi, Sharjah, or other emirates).
-- For "link": if the content clearly gives a direct URL to that specific job posting, use it. If you can only identify the job from a listing page and no specific posting URL is visible, use that listing page's URL instead — do not fabricate a URL that isn't present in the content.
-- Only include postings that appear to be from the last ${maxAgeDays} days, OR where the page itself is clearly a live/current listing (e.g. dated within the last week, or explicitly says "today", "new") even if an exact per-job date isn't shown. If a page gives no date signal at all and isn't clearly current, drop only that specific job, not the whole page.
-- NEVER invent a job whose title or company isn't actually present in the content below. Every job you output must be traceable to real text in the input.
-- If nothing in the results qualifies, return an empty jobs array — do not pad with unrelated results.
+- For "link": the content below is in markdown, so individual job links usually appear as markdown links like [Job Title](https://...). Use that specific job's own URL whenever you can find one. Only fall back to the page's own URL (given above each block) if no specific per-job link is present in the content — never fabricate a URL that isn't in the text below.
+- Only include postings that appear to be from the last ${maxAgeDays} days, OR where the page itself is clearly a live/current listing (dated within the last week, or says "today"/"new") even if an exact per-job date isn't shown. If a page gives no date signal at all and isn't clearly current, drop only that specific job.
+- NEVER invent a job whose title or company isn't actually present in the content below.
+- If nothing qualifies, return an empty jobs array.
 
-Roles searched: ${roles.join(', ')}
-
-Raw search results:
-${context}
+Raw search results for "${role}":
+${snippets}
 
 Respond ONLY with a JSON object (no markdown fences, no prose) in this exact shape:
 {
@@ -196,35 +229,22 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
       "location": "string",
       "postedRelative": "e.g. '2 days ago' or 'Today'",
       "experienceLevel": "one of: Entry-level / Fresher, Mid-level, Senior-level, Not specified",
-      "matchedRole": "which searched role this corresponds to",
+      "matchedRole": "${role}",
       "description": "one sentence, plain language",
-      "link": "the exact URL from the snippet"
+      "link": "the specific job posting URL if found in the content, otherwise the page URL given above"
     }
   ]
 }`;
 
-  // Groq (https://groq.com) — free tier, no credit card, fast inference.
-  // Rather than hardcode specific model names (which Groq periodically
-  // renames/retires/restricts per-account), we ask the account's own
-  // /models endpoint what it actually has access to right now, and pick
-  // from that live list. This is the "auto-pick" approach — it can't go
-  // stale the way a hardcoded model name can.
-  const PREFERRED_MODEL_ORDER = [
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'openai/gpt-oss-20b',
-    'openai/gpt-oss-120b',
-    'qwen/qwen3-32b',
-    'moonshotai/kimi-k2-instruct'
-  ];
+  return callGroqWithFallback(prompt, modelsToTry);
+}
 
-  const availableModels = await getAvailableGroqModels();
-  const modelsToTry = pickModelsToTry(availableModels, PREFERRED_MODEL_ORDER);
-
-  if (modelsToTry.length === 0) {
-    throw new Error('No usable Groq models found for this API key.');
-  }
-
+/**
+ * Send one prompt to Groq, retrying transient failures and falling back
+ * across models as needed. Returns the parsed "jobs" array, or throws
+ * after every model/attempt is exhausted.
+ */
+async function callGroqWithFallback(prompt, modelsToTry) {
   const MAX_ATTEMPTS_PER_MODEL = 2;
   const RETRY_DELAY_MS = 1500;
 
@@ -243,7 +263,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
             model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.2,
-            max_tokens: 6000,
+            max_tokens: 2000,
             response_format: { type: 'json_object' } // forces valid JSON output where the model supports it
           })
         });
@@ -258,7 +278,7 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
             await sleep(RETRY_DELAY_MS * attempt);
             continue; // retry same model, or fall through to next model after MAX_ATTEMPTS_PER_MODEL
           }
-          break; // non-transient (e.g. this specific model rejected) — skip to next model, don't retry it
+          break; // non-transient (e.g. this specific model rejected, or still too large) — skip to next model
         }
 
         const data = await response.json();
@@ -266,9 +286,6 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
         const text = data.choices?.[0]?.message?.content || '';
 
         if (finishReason === 'length') {
-          // Output got cut off before finishing — a partial JSON object will
-          // never parse. Treat this like a transient failure and retry
-          // (a shorter result set or different model may fit).
           console.error(`Groq response truncated (model: ${model}, attempt: ${attempt}) — hit max_tokens.`);
           lastError = new Error('LLM structuring failed: response truncated (max_tokens).');
           await sleep(RETRY_DELAY_MS * attempt);
@@ -287,14 +304,12 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
 
       } catch (err) {
         lastError = err;
-        // Network-level error (not an HTTP error response) — also worth a retry.
         await sleep(RETRY_DELAY_MS * attempt);
       }
     }
     console.warn(`Model ${model} unavailable/exhausted, falling back to next model.`);
   }
 
-  // All models/attempts exhausted — surface the last real error.
   throw lastError || new Error('LLM structuring failed: all models unavailable.');
 }
 
