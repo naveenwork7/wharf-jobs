@@ -175,35 +175,71 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   ]
 }`;
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 2000 }
-      })
+  // Google's free tier occasionally returns 503 ("model overloaded") or 429
+  // (rate limited) under high demand — these are transient, not real
+  // failures. We retry with backoff, and if a specific model is struggling,
+  // fall back to sibling Flash models before giving up.
+  const MODEL_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  const MAX_ATTEMPTS_PER_MODEL = 2;
+  const RETRY_DELAY_MS = 1500;
+
+  let lastError = null;
+
+  for (const model of MODEL_FALLBACKS) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.2, maxOutputTokens: 2000 }
+            })
+          }
+        );
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          const isTransient = response.status === 503 || response.status === 429;
+          console.error(`Gemini API error ${response.status} (model: ${model}, attempt: ${attempt}):`, errorBody);
+          lastError = new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
+
+          if (isTransient) {
+            await sleep(RETRY_DELAY_MS * attempt);
+            continue; // retry same model, or fall through to next model after MAX_ATTEMPTS_PER_MODEL
+          }
+          throw lastError; // non-transient error (e.g. bad API key) — no point retrying
+        }
+
+        const data = await response.json();
+        const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+        const cleaned = text.replace(/```json|```/g, '').trim();
+
+        try {
+          const parsed = JSON.parse(cleaned);
+          return parsed.jobs || [];
+        } catch (e) {
+          console.error('Failed to parse LLM output:', text);
+          return [];
+        }
+
+      } catch (err) {
+        lastError = err;
+        // Network-level error (not an HTTP error response) — also worth a retry.
+        await sleep(RETRY_DELAY_MS * attempt);
+      }
     }
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`Gemini API error ${response.status}:`, errorBody);
-    throw new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
+    console.warn(`Model ${model} exhausted ${MAX_ATTEMPTS_PER_MODEL} attempts, falling back to next model.`);
   }
 
-  const data = await response.json();
-  const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-  const cleaned = text.replace(/```json|```/g, '').trim();
+  // All models/attempts exhausted — surface the last real error.
+  throw lastError || new Error('LLM structuring failed: all models unavailable.');
+}
 
-  try {
-    const parsed = JSON.parse(cleaned);
-    return parsed.jobs || [];
-  } catch (e) {
-    console.error('Failed to parse LLM output:', text);
-    return [];
-  }
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 app.listen(PORT, () => {
