@@ -21,7 +21,7 @@
  *   npm init -y
  *   npm install express cors node-fetch dotenv
  *   echo "TAVILY_API_KEY=your_key_here" > .env
- *   echo "ANTHROPIC_API_KEY=your_key_here" >> .env
+ *   echo "GEMINI_API_KEY=your_key_here" >> .env
  *   node server.js
  *
  * Then open index.html (or serve it statically — see bottom of this file)
@@ -50,7 +50,7 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const CACHE_TTL_MS = 3 * 60 * 1000; // shared cache window, shorter than the 5-min client refresh
 
 // In-memory shared cache: { cacheKey: { timestamp, jobs } }
@@ -175,28 +175,26 @@ Respond ONLY with a JSON object (no markdown fences, no prose) in this exact sha
   ]
 }`;
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      messages: [{ role: 'user', content: prompt }]
-    })
-  });
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2000 }
+      })
+    }
+  );
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Anthropic API error ${response.status}:`, errorBody);
+    console.error(`Gemini API error ${response.status}:`, errorBody);
     throw new Error(`LLM structuring failed: ${response.status} — ${errorBody}`);
   }
 
   const data = await response.json();
-  const text = (data.content || []).map(b => b.text || '').join('');
+  const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
   const cleaned = text.replace(/```json|```/g, '').trim();
 
   try {
